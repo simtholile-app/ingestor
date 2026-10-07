@@ -270,9 +270,10 @@ class GlobalIngestionEngine:
         """
         active_set = set(active_ids)
 
+        from google.cloud.firestore_v1.base_query import FieldFilter
         existing_docs = self.db.collection("cases") \
-            .where("source", "==", adapter.source_name) \
-            .where("status", "==", "OPEN") \
+            .where(filter=FieldFilter("source", "==", adapter.source_name)) \
+            .where(filter=FieldFilter("status", "==", "OPEN")) \
             .stream()
 
         for doc in existing_docs:
@@ -559,10 +560,11 @@ class GlobalIngestionEngine:
                 if circ:
                     is_dup = circ in seen_circulations
                     if not is_dup and self.mode == "remote":
+                        from google.cloud.firestore_v1.base_query import FieldFilter
                         is_dup = len(
                             self.db.collection("cases")
-                            .where("source", "==", adapter.source_name)
-                            .where("circulationNumber", "==", circ)
+                            .where(filter=FieldFilter("source", "==", adapter.source_name))
+                            .where(filter=FieldFilter("circulationNumber", "==", circ))
                             .limit(1).get()
                         ) > 0
                     if is_dup:
