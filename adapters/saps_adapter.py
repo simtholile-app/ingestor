@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 from typing import List, Dict, Any
 from adapters.base_adapter import BaseAuthorityAdapter
 
-# Suppress insecure HTTPS warnings if fallback is triggered due to local SSL cert issues
+# Suppress insecure HTTPS warnings if fallback is triggered due to missing CA root certificates on Linux runners
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Polite delay between requests to avoid hammering SAPS server
@@ -15,15 +15,18 @@ REQUEST_DELAY_SECONDS = 1.0
 
 
 def _safe_get(url: str, headers: dict = None, timeout: int = 30) -> requests.Response:
-    """GET request that falls back gracefully if local SSL certificate verification fails."""
+    """GET request that falls back gracefully with verify=False if SSL certificate verification fails."""
     if headers is None:
         headers = {"User-Agent": "SimtholileGlobal/1.0"}
     try:
         return requests.get(url, headers=headers, timeout=timeout)
-    except requests.exceptions.SSLError as e:
-        print(f"  [WARN] SSL certificate verification failed for {url}: {e}")
-        print("  [WARN] Retrying request with SSL verification disabled...")
-        return requests.get(url, headers=headers, timeout=timeout, verify=False)
+    except Exception as e:
+        err_str = str(e)
+        if "SSL" in err_str or "CERTIFICATE_VERIFY_FAILED" in err_str or isinstance(e, requests.exceptions.SSLError):
+            print(f"  [WARN] SSL certificate verification failed for {url}: {e}")
+            print("  [WARN] Retrying request with SSL verification disabled...")
+            return requests.get(url, headers=headers, timeout=timeout, verify=False)
+        raise
 
 
 class SAPSAdapter(BaseAuthorityAdapter):
@@ -87,6 +90,7 @@ class SAPSAdapter(BaseAuthorityAdapter):
                 res.raise_for_status()
                 return res
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                # If connection error is SSL related, _safe_get already handled or will raise
                 if attempt == retries:
                     raise
                 wait = backoff * attempt
