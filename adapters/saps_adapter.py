@@ -2,12 +2,28 @@ import re
 import time
 import urllib.parse
 import requests
+import urllib3
 from bs4 import BeautifulSoup
 from typing import List, Dict, Any
 from adapters.base_adapter import BaseAuthorityAdapter
 
+# Suppress insecure HTTPS warnings if fallback is triggered due to local SSL cert issues
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 # Polite delay between requests to avoid hammering SAPS server
 REQUEST_DELAY_SECONDS = 1.0
+
+
+def _safe_get(url: str, headers: dict = None, timeout: int = 30) -> requests.Response:
+    """GET request that falls back gracefully if local SSL certificate verification fails."""
+    if headers is None:
+        headers = {"User-Agent": "SimtholileGlobal/1.0"}
+    try:
+        return requests.get(url, headers=headers, timeout=timeout)
+    except requests.exceptions.SSLError as e:
+        print(f"  [WARN] SSL certificate verification failed for {url}: {e}")
+        print("  [WARN] Retrying request with SSL verification disabled...")
+        return requests.get(url, headers=headers, timeout=timeout, verify=False)
 
 
 class SAPSAdapter(BaseAuthorityAdapter):
@@ -43,7 +59,7 @@ class SAPSAdapter(BaseAuthorityAdapter):
         return "ZA"
 
     def fetch_active_external_ids(self) -> List[str]:
-        res = requests.get(self.LIST_URL, headers={"User-Agent": "SimtholileGlobal/1.0"}, timeout=30)
+        res = _safe_get(self.LIST_URL, timeout=30)
         res.raise_for_status()
         soup = BeautifulSoup(res.text, "html.parser")
 
@@ -67,7 +83,7 @@ class SAPSAdapter(BaseAuthorityAdapter):
         """GET with retry/backoff on timeout, connection errors or 5xx."""
         for attempt in range(1, retries + 1):
             try:
-                res = requests.get(url, headers={"User-Agent": "SimtholileGlobal/1.0"}, timeout=30)
+                res = _safe_get(url, timeout=30)
                 res.raise_for_status()
                 return res
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:

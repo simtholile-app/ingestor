@@ -188,14 +188,25 @@ class GlobalIngestionEngine:
             local_image_path = os.path.join(media_dir, f"{case_id}.jpg")
 
             try:
-                res = requests.get(
-                    image_url,
-                    timeout=15,
-                    headers={
-                        "User-Agent": "SimtholileDev/1.0",
-                        "Referer": "https://www.saps.gov.za/crimestop/missing/",
-                    },
-                )
+                try:
+                    res = requests.get(
+                        image_url,
+                        timeout=15,
+                        headers={
+                            "User-Agent": "SimtholileDev/1.0",
+                            "Referer": "https://www.saps.gov.za/crimestop/missing/",
+                        },
+                    )
+                except requests.exceptions.SSLError:
+                    res = requests.get(
+                        image_url,
+                        timeout=15,
+                        verify=False,
+                        headers={
+                            "User-Agent": "SimtholileDev/1.0",
+                            "Referer": "https://www.saps.gov.za/crimestop/missing/",
+                        },
+                    )
                 res.raise_for_status()
                 with open(local_image_path, "wb") as f:
                     f.write(res.content)
