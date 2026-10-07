@@ -328,6 +328,26 @@ class GlobalIngestionEngine:
             id_parts.append(f"Weight: {data['weight']}")
         identifying_details = "; ".join(id_parts) if id_parts else None
 
+        # --- Contact Person & Representative (Police Officer) ---
+        officer_name = data.get("investigating_officer")
+        station_name = data.get("station")
+        if officer_name and station_name:
+            poster_name = f"{officer_name} ({station_name})"
+        elif officer_name:
+            poster_name = officer_name
+        elif station_name:
+            poster_name = f"SAPS Official ({station_name})"
+        else:
+            poster_name = "SAPS Official"
+
+        contact_info = {
+            "officerName": officer_name,
+            "officerPhone": data.get("contact_number"),
+            "stationName": station_name,
+            "stationPhone": data.get("station_phone"),
+            "email": data.get("contact_email"),
+        }
+
         # --- /people/{personId} — matches FirestorePerson.kt ---
         person_ref = self.db.collection("people").document()
         person_doc = {
@@ -342,11 +362,11 @@ class GlobalIngestionEngine:
             "gender": data.get("gender"),
             "photoUrl": photo_url,
             "photoStoragePath": None,
-            "phoneNumber": None,
+            "phoneNumber": data.get("contact_number") or data.get("station_phone"),
             "identifyingDetails": identifying_details,
             "createdByUserId": self.author_user_id,
             "country": adapter.country_code,
-            "town": data.get("station"),
+            "town": station_name,
             "createdAt": firestore.SERVER_TIMESTAMP,
             "updatedAt": firestore.SERVER_TIMESTAMP,
         }
@@ -364,12 +384,13 @@ class GlobalIngestionEngine:
             "caseType": "MISSING",
             "status": "OPEN",
             "createdByUserId": self.author_user_id,
-            "posterName": "Simtholile Ingestor",
+            "posterName": poster_name,
             "posterPhotoUrl": None,
             "posterType": "ORGANISATION",
+            "contact": contact_info,
             "lastKnownLocation": None,
             "lastKnownLocationPrecision": "AREA",
-            "lastKnownLocationDescription": data.get("station"),
+            "lastKnownLocationDescription": station_name,
             "country": adapter.country_code,
             "summary": summary,
             "lastKnownTime": None,
@@ -416,13 +437,14 @@ class GlobalIngestionEngine:
             "caseId": case_ref.id,
             "displayName": display_name,
             "photoUrl": photo_url,
-            "posterName": "Simtholile Ingestor",
+            "posterName": poster_name,
             "posterPhotoUrl": None,
             "posterType": "ORGANISATION",
+            "contact": contact_info,
             "caseType": "MISSING",
             "status": "OPEN",
             "createdByUserId": self.author_user_id,
-            "approximateLocation": data.get("station"),
+            "approximateLocation": station_name,
             "country": adapter.country_code,
             "sightingCount": 0,
             "lastActivityAt": firestore.SERVER_TIMESTAMP,
@@ -471,7 +493,7 @@ class GlobalIngestionEngine:
             "description": summary,
             "location": None,
             "locationPrecision": "AREA",
-            "locationDescription": data.get("station"),
+            "locationDescription": station_name,
             "observedAt": None,
             "createdAt": firestore.SERVER_TIMESTAMP,
             "sourceType": "OFFICIAL",
@@ -483,6 +505,7 @@ class GlobalIngestionEngine:
             "clientGeneratedId": report_ref.id,
             "status": "ACTIVE",
             "needs": [],
+            "contact": contact_info,
         })
 
         print(f"    Written: person/{person_ref.id} + case/{case_ref.id} + public_case + report/{report_ref.id}")
