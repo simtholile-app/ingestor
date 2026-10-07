@@ -7,7 +7,6 @@ from firebase_admin import credentials, firestore, db as rtdb
 from engine import GlobalIngestionEngine
 
 from adapters.saps_adapter import SAPSAdapter
-from adapters.interpol_adapter import InterpolAdapter
 
 
 def init_firebase():
@@ -60,7 +59,6 @@ if __name__ == "__main__":
 
     global_adapters = [
         SAPSAdapter(),
-        InterpolAdapter(),
     ]
 
     engine = GlobalIngestionEngine(db, global_adapters, ingest_limit=ingest_limit, realtime_db=realtime_db)
