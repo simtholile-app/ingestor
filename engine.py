@@ -488,7 +488,13 @@ class GlobalIngestionEngine:
 
         for adapter in self.adapters:
             print(f"\n--- Processing [{adapter.source_name}] ---")
-            active_ids = adapter.fetch_active_external_ids()
+            try:
+                active_ids = adapter.fetch_active_external_ids()
+            except Exception as e:
+                print(f"  [ERROR] Failed to fetch active IDs for [{adapter.source_name}]: {e}")
+                print(f"  [WARN] Skipping adapter [{adapter.source_name}] for this run.")
+                continue
+
             print(f"Active cases found: {len(active_ids)}")
 
             # Adapters that can order IDs newest-first do so here, before the limit is applied.
@@ -511,7 +517,10 @@ class GlobalIngestionEngine:
 
             # Soft-delete cases that vanished from the official source (remote only)
             if self.mode == "remote":
-                self._soft_delete_removed_cases(adapter, active_ids)
+                try:
+                    self._soft_delete_removed_cases(adapter, active_ids)
+                except Exception as e:
+                    print(f"  [ERROR] Failed to run soft-delete check for [{adapter.source_name}]: {e}")
 
             total = len(pending_ids)
             if total == 0:
