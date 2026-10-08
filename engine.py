@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import requests
@@ -83,6 +84,8 @@ class GlobalIngestionEngine:
         self.ingest_limit = ingest_limit
         # firebase_admin.db module reference — used for Realtime Database state tracking
         self.rtdb = realtime_db
+        self.seen_session_dhashes = {}
+        self.existing_media_hashes = self._load_existing_media_hashes()
 
         if self.mode == "remote":
             cloudinary.config(
@@ -91,6 +94,31 @@ class GlobalIngestionEngine:
                 api_secret=Settings.CLOUDINARY_API_SECRET,
                 secure=True
             )
+
+    def _load_existing_media_hashes(self) -> dict:
+        """Loads MD5 and perceptual dhashes of all previously saved media files into memory for cross-case deduplication."""
+        import hashlib
+        media_hashes = {}
+        if self.mode == "local":
+            media_base = os.path.join(self.local_dir, "media")
+            if os.path.exists(media_base):
+                for root, _, files in os.walk(media_base):
+                    for f in files:
+                        if f.endswith((".jpg", ".png")):
+                            cid = f.rsplit(".", 1)[0]
+                            path = os.path.join(root, f)
+                            try:
+                                with open(path, "rb") as fp:
+                                    data = fp.read()
+                                    m = hashlib.md5(data).hexdigest()
+                                    media_hashes[m] = cid
+                                from PIL import Image
+                                with Image.open(path) as img:
+                                    dh = self._compute_dhash(img)
+                                    media_hashes[dh] = cid
+                            except Exception:
+                                pass
+        return media_hashes
 
     # ------------------------------------------------------------------
     # Incremental state helpers
@@ -154,6 +182,16 @@ class GlobalIngestionEngine:
             json.dump(list(ingested_ids), f)
         os.replace(tmp_path, path)
 
+    @staticmethod
+    def _normalize_name(name: Optional[str]) -> str:
+        """Normalizes full name for de-duplication (lowercased, spaces collapsed)."""
+        if not name:
+            return ""
+        cleaned = re.sub(r"\s+", " ", name.strip().lower())
+        if cleaned in {"saps missing person", "missing person", "unknown", "name unknown"}:
+            return ""
+        return cleaned
+
     def _load_known_circulations(self, source_name: str) -> Set[str]:
         """Circulation numbers already saved (uppercased), for de-duplication."""
         if self.mode == "remote":
@@ -173,13 +211,176 @@ class GlobalIngestionEngine:
         except (json.JSONDecodeError, OSError):
             return set()
 
+    def _load_known_names(self, source_name: str) -> Set[str]:
+        """Full names already saved (normalized), for de-duplication."""
+        if self.mode == "remote":
+            return set()
+
+        filepath = os.path.join(self.local_dir, "json", f"{source_name.lower()}_cases.json")
+        if not os.path.exists(filepath):
+            return set()
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                return {
+                    self._normalize_name(r.get("full_name"))
+                    for r in json.load(f)
+                    if r.get("full_name") and self._normalize_name(r.get("full_name"))
+                }
+        except (json.JSONDecodeError, OSError):
+            return set()
+
+    # Hashes of known default placeholder images (e.g. SAPS default missing photo graphics / silhouettes)
+    KNOWN_PLACEHOLDER_HASHES = {
+        "9c1add645c47dc4a703dc56c9fe625d5",
+        "bacad53fef647620bf2271d3ea66f9e3",
+        "3d945e8339185efcf111ccfa1b53e96c",
+        "8a6730542dc82b1c816346af01d125f4",
+        "f8d9845cef094644687f8c15b3d1844e",
+        "531e38793f28d7d90637ae9eb1d26dd7",
+        "12fb87ee0ff12e6af3028b6f0a528b9f",
+        "6304d10040560c160bbce182abb06def",
+        "48304aba26bb8d91ceb89395b73cb721",
+        "43a8af4ad4e6fe32cdde6a38338590ff",
+        "a41d394ee7749a126d266fa4b0a01fee",
+        "feee371539c823313cc2559425e3b327",
+        "b1b1fe3fc3a80759bcf596f14be50b4b",
+        "ac0e90633fe86500d3e4b6edde58c6f5",
+        "a00db4d7ff248bebd6bcb653dde31784",
+        "4a6c5ad25778d5b85623ed501139f6c4",
+        "c003577265336a86d342f8427749cd91",
+        "0a5b950704c13fcf2d56ff293343f081",
+        "13f93c972e776c1f6aca33415d6a1621",
+        "073361c266dccbf7",
+        "e3d53f35089adbab37d587a937f5fafd",
+        "c62211ac4f9bf3e3a47fc64946192232",
+        "bd0c57d0a7c5859d4db8c9a131825b7d",
+        "9e2b61495dc50468773a2fc335996630",
+    }
+
+    KNOWN_PLACEHOLDER_DHASHES = {
+        "1e3979b86c7db99b",
+        "0723419185838282",
+        "8e0f230b2d4e8f8e",
+        "f17070bcbf3b1bdd",
+        "2623331303070706",
+        "7ee7cbf15939965c",
+        "73c51656ce4c5a4e",
+        "828b848c9e9e8e8c",
+        "d8d8e417351a9e1e",
+        "3f3f79497b6d7d5b",
+        "0203232949032167",
+        "656351653333c760",
+        "073361c266dccbf7",
+        "073f5f1b3b6f3f1e",
+        "6767c3ab2b0e2406",
+        "ce33631307170606",
+        "e2c0d2f2e066bc38",
+    }
+
+    @staticmethod
+    def _compute_dhash(img, hash_size=8) -> str:
+        """Computes perceptual difference hash (dhash) invariant to JPEG recompression/quality."""
+        from PIL import Image
+        image = img.convert('L').resize((hash_size + 1, hash_size), Image.Resampling.LANCZOS)
+        pixels = list(image.getdata())
+        difference = []
+        for row in range(hash_size):
+            for col in range(hash_size):
+                pixel_left = pixels[row * (hash_size + 1) + col]
+                pixel_right = pixels[row * (hash_size + 1) + col + 1]
+                difference.append(pixel_left > pixel_right)
+        decimal_value = 0
+        hex_string = []
+        for index, value in enumerate(difference):
+            if value:
+                decimal_value += 2**(index % 8)
+            if (index % 8) == 7:
+                hex_string.append(hex(decimal_value)[2:].zfill(2))
+                decimal_value = 0
+        return "".join(hex_string)
+
+    def _is_placeholder_photo(self, img_bytes: bytes, case_id: str) -> bool:
+        """Determines if downloaded image bytes correspond to an authority default placeholder image."""
+        if not img_bytes:
+            return True
+
+        import hashlib, io
+        from PIL import Image, ImageStat
+
+        md5_hash = hashlib.md5(img_bytes).hexdigest()
+        if md5_hash in self.KNOWN_PLACEHOLDER_HASHES:
+            print(f"    [INFO] Detected default placeholder photo (MD5: {md5_hash}) for {case_id}, skipping photo assignment.")
+            return True
+
+        try:
+            with Image.open(io.BytesIO(img_bytes)) as img:
+                dhash_val = self._compute_dhash(img)
+                if dhash_val in self.KNOWN_PLACEHOLDER_DHASHES:
+                    print(f"    [INFO] Detected default placeholder photo (dhash: {dhash_val}) for {case_id}, skipping photo assignment.")
+                    return True
+
+                w, h = img.size
+                stat = ImageStat.Stat(img)
+                color_diff = max(abs(stat.mean[0]-stat.mean[1]), abs(stat.mean[1]-stat.mean[2]), abs(stat.mean[2]-stat.mean[0])) if len(stat.mean) >= 3 else 0
+
+                # Check greyscale graphic template (e.g. 240x320 or 192x262 standard canvas)
+                if (w, h) in [(240, 320), (192, 262)] and color_diff < 2.0:
+                    print(f"    [INFO] Detected greyscale template graphic (size: {w}x{h}, c_diff: {color_diff:.1f}) for {case_id}, skipping photo assignment.")
+                    self.KNOWN_PLACEHOLDER_DHASHES.add(dhash_val)
+                    return True
+
+                # Dynamic runtime duplicate check: only flag as generic placeholder if graphic is low color-variance
+                if dhash_val in self.seen_session_dhashes:
+                    prev_case = self.seen_session_dhashes[dhash_val]
+                    if color_diff < 5.0:
+                        print(f"    [INFO] Detected duplicate placeholder graphic (dhash: {dhash_val}) shared between {prev_case} and {case_id}, skipping photo assignment.")
+                        self.KNOWN_PLACEHOLDER_DHASHES.add(dhash_val)
+                        return True
+                    else:
+                        print(f"    [INFO] Re-used victim photo detected for duplicate case entry {case_id} (matches {prev_case}).")
+                        # Still allow saving/referencing real photo for valid case records
+                        return False
+                self.seen_session_dhashes[dhash_val] = case_id
+
+        except Exception as e:
+            print(f"    [WARN] Failed to analyze image features for {case_id}: {e}")
+
+        return False
+
     # ------------------------------------------------------------------
     # Photo processing
     # ------------------------------------------------------------------
 
     def process_photo(self, image_url: str, case_id: str, is_minor: bool, country_code: str) -> Optional[str]:
-        """Handles local file downloads or Cloudinary remote uploads depending on STORAGE_MODE."""
+        """Handles local file downloads or Cloudinary remote uploads depending on STORAGE_MODE.
+        Filters out generic authority placeholder images so missing people without real photos
+        are not assigned duplicate placeholder images as their profile pictures.
+        """
         if not image_url:
+            return None
+
+        # Download image bytes first to verify content and check against placeholder hashes
+        try:
+            time.sleep(0.5)
+            session = requests.Session()
+            session.cookies.clear()
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": "https://www.saps.gov.za/crimestop/missing/",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+            }
+            try:
+                res = session.get(image_url, timeout=15, headers=headers)
+            except requests.exceptions.SSLError:
+                res = session.get(image_url, timeout=15, verify=False, headers=headers)
+            res.raise_for_status()
+        except Exception as e:
+            print(f"    [WARN] Failed to download photo for {case_id}: {e}")
+            return None
+
+        img_bytes = res.content
+        if self._is_placeholder_photo(img_bytes, case_id):
             return None
 
         if self.mode == "local":
@@ -188,35 +389,16 @@ class GlobalIngestionEngine:
             local_image_path = os.path.join(media_dir, f"{case_id}.jpg")
 
             try:
-                try:
-                    res = requests.get(
-                        image_url,
-                        timeout=15,
-                        headers={
-                            "User-Agent": "SimtholileDev/1.0",
-                            "Referer": "https://www.saps.gov.za/crimestop/missing/",
-                        },
-                    )
-                except requests.exceptions.SSLError:
-                    res = requests.get(
-                        image_url,
-                        timeout=15,
-                        verify=False,
-                        headers={
-                            "User-Agent": "SimtholileDev/1.0",
-                            "Referer": "https://www.saps.gov.za/crimestop/missing/",
-                        },
-                    )
-                res.raise_for_status()
                 with open(local_image_path, "wb") as f:
-                    f.write(res.content)
+                    f.write(img_bytes)
                 print(f"    Saved photo: {local_image_path}")
                 return os.path.abspath(local_image_path)
             except Exception as e:
-                print(f"    [WARN] Failed to download photo for {case_id}: {e}")
+                print(f"    [WARN] Failed to save photo for {case_id}: {e}")
                 return None
 
         else:
+            import io
             transformation = [
                 {'width': 600, 'height': 600, 'crop': 'fill', 'gravity': 'face'},
                 {'quality': 'auto', 'fetch_format': 'auto'}
@@ -225,7 +407,7 @@ class GlobalIngestionEngine:
                 transformation.append({'effect': 'blur:200'})
 
             result = cloudinary.uploader.upload(
-                image_url,
+                io.BytesIO(img_bytes),
                 folder=f"simtholile/{country_code.lower()}/cases/{case_id}",
                 public_id="primary_photo",
                 transformation=transformation,
@@ -536,8 +718,9 @@ class GlobalIngestionEngine:
             active_ids = adapter.sort_ids_by_recency(active_ids)
 
             new_records = []
-            # SAPS republishes the same case under several bids, so de-dupe on circulation number
+            # SAPS republishes the same case under several bids, so de-dupe on circulation number and full name
             seen_circulations = self._load_known_circulations(adapter.source_name)
+            seen_names = self._load_known_names(adapter.source_name)
 
             # ---- Load already-ingested IDs ----
             ingested_ids = self._load_ingested_ids(adapter.source_name)
@@ -578,24 +761,52 @@ class GlobalIngestionEngine:
                     print(f"    [ERROR] Skipping record [{ext_id}]: {e}")
                     continue
 
-                # ---- De-dupe: same circulation number = same case under a different bid ----
+                # ---- De-dupe: same circulation number OR same full name = same case under a different bid ----
                 circ = (data.get("circulation_number") or "").strip().upper()
-                if circ:
-                    is_dup = circ in seen_circulations
-                    if not is_dup and self.mode == "remote":
-                        from google.cloud.firestore_v1.base_query import FieldFilter
+                norm_name = self._normalize_name(data.get("full_name"))
+
+                is_dup = False
+                dup_reason = ""
+
+                if circ and circ in seen_circulations:
+                    is_dup = True
+                    dup_reason = f"circulation number {circ}"
+                elif norm_name and norm_name in seen_names:
+                    is_dup = True
+                    dup_reason = f"name '{data.get('full_name')}'"
+
+                if not is_dup and self.mode == "remote":
+                    from google.cloud.firestore_v1.base_query import FieldFilter
+                    if circ:
                         is_dup = len(
                             self.db.collection("cases")
                             .where(filter=FieldFilter("source", "==", adapter.source_name))
                             .where(filter=FieldFilter("circulationNumber", "==", circ))
                             .limit(1).get()
                         ) > 0
-                    if is_dup:
-                        print(f"    [DUP] {circ} already ingested, skipping [{ext_id}]")
-                        # Mark as handled so it isn't re-fetched next run
-                        self._save_ingested_id(adapter.source_name, ext_id, ingested_ids)
-                        continue
+                        if is_dup:
+                            dup_reason = f"circulation number {circ}"
+                    if not is_dup and norm_name:
+                        first_name, last_name, display_name = _split_name(data.get("full_name") or "")
+                        is_dup = len(
+                            self.db.collection("cases")
+                            .where(filter=FieldFilter("source", "==", adapter.source_name))
+                            .where(filter=FieldFilter("displayName", "==", display_name))
+                            .limit(1).get()
+                        ) > 0
+                        if is_dup:
+                            dup_reason = f"name '{display_name}'"
+
+                if is_dup:
+                    print(f"    [DUP] Case already ingested ({dup_reason}), skipping [{ext_id}]")
+                    # Mark as handled so it isn't re-fetched next run
+                    self._save_ingested_id(adapter.source_name, ext_id, ingested_ids)
+                    continue
+
+                if circ:
                     seen_circulations.add(circ)
+                if norm_name:
+                    seen_names.add(norm_name)
 
                 case_id = f"{adapter.country_code}_{ext_id.replace('/', '_')}"
 

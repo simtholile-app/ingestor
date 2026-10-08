@@ -1,5 +1,6 @@
 import re
 import time
+import random
 import urllib.parse
 import requests
 import urllib3
@@ -16,16 +17,24 @@ REQUEST_DELAY_SECONDS = 1.0
 
 def _safe_get(url: str, headers: dict = None, timeout: int = 30) -> requests.Response:
     """GET request that falls back gracefully with verify=False if SSL certificate verification fails."""
-    if headers is None:
-        headers = {"User-Agent": "SimtholileGlobal/1.0"}
+    req_headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+    }
+    if headers:
+        req_headers.update(headers)
+
+    session = requests.Session()
+    session.cookies.clear()
     try:
-        return requests.get(url, headers=headers, timeout=timeout)
+        return session.get(url, headers=req_headers, timeout=timeout)
     except Exception as e:
         err_str = str(e)
         if "SSL" in err_str or "CERTIFICATE_VERIFY_FAILED" in err_str or isinstance(e, requests.exceptions.SSLError):
             print(f"  [WARN] SSL certificate verification failed for {url}: {e}")
             print("  [WARN] Retrying request with SSL verification disabled...")
-            return requests.get(url, headers=headers, timeout=timeout, verify=False)
+            return session.get(url, headers=req_headers, timeout=timeout, verify=False)
         raise
 
 
@@ -107,8 +116,8 @@ class SAPSAdapter(BaseAuthorityAdapter):
     def parse_case_details(self, external_id: str) -> Dict[str, Any]:
         url = f"{self.DETAIL_URL}?bid={external_id}"
 
-        # Polite delay before every detail request
-        time.sleep(REQUEST_DELAY_SECONDS)
+        # Polite delay with jitter before every detail request to avoid SAPS server throttling & session overlap
+        time.sleep(random.uniform(1.0, 1.5))
 
         res = self._get_with_retry(url)
         soup = BeautifulSoup(res.text, "html.parser")
@@ -153,9 +162,13 @@ class SAPSAdapter(BaseAuthorityAdapter):
             data["missing_date"] = data["missing_date"].replace("/", "-")
 
         # --- Photo ---
-        img_tag = soup.find("img", src=re.compile(r"thumbnail\.php|image\.php|photo", re.I))
+        # SAPS missing person profile pictures specifically use 'thumbnail.php?id=<digits>'
+        img_tag = soup.find("img", src=re.compile(r"thumbnail\.php\?id=\d+", re.I))
+
         if img_tag and img_tag.get("src"):
             data["raw_photo_url"] = urllib.parse.urljoin(self.BASE_URL, img_tag["src"])
+        else:
+            data["raw_photo_url"] = None
 
         # --- Minor detection ---
         # Page shows a red "Adult" label under the name. Anything else is treated as a minor
